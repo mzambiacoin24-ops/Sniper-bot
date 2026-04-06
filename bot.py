@@ -13,18 +13,19 @@ JUPITER_API = "https://quote-api.jup.ag/v6"
 DRY_RUN = True
 
 WHALE_WALLETS = [
+    "AVAZvHLR2PcWpDf8BXY4rVxNHYRBytycHkcB5z5QNXYm",
+    "4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t",
+    "8zFZHuSRuDpuAR7J6FzwyF3vKNx4CVW3DFHJerQhc7Zd",
+    "H72yLkhTnoBfhBTXXaj1RBXuirm8s8G5fcVh2XpQLggM",
     "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
-    "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
-    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
     "CuieVDEDtLo7FypA9SbLM9saXFdb1dsshEkyErMqkRQq",
 ]
 
-MIN_WHALE_BUY_USD = 5000
-MIN_LIQUIDITY_USD = 20000
+MIN_WHALE_BUY_USD = 1000
+MIN_LIQUIDITY_USD = 10000
 MAX_TOP_HOLDER_PCT = 20
-MIN_WALLET_AGE_DAYS = 30
-MIN_WHALE_WIN_RATE = 0.55
-MAX_PRICE_IMPACT_PCT = 10
+MIN_WALLET_AGE_DAYS = 7
+MAX_PRICE_IMPACT_PCT = 15
 BUY_AMOUNT_SOL = 0.05
 
 def log(msg):
@@ -55,21 +56,23 @@ async def get_sol_price(session):
             data = await r.json()
             return float(data["solana"]["usd"])
     except:
-        return 130.0
+        return 85.0
 
-async def get_token_price_usd(session, token_mint):
+async def can_sell_token(session, token_mint):
     try:
-        url = f"https://price.jup.ag/v4/price?ids={token_mint}"
+        url = f"{JUPITER_API}/quote?inputMint={token_mint}&outputMint=So11111111111111111111111111111111111111112&amount=1000000&slippageBps=1500"
         async with session.get(url) as r:
+            if r.status != 200:
+                return False
             data = await r.json()
-            price = data.get("data", {}).get(token_mint, {}).get("price", 0)
-            return float(price)
+            impact = float(data.get("priceImpactPct", 100))
+            return impact < MAX_PRICE_IMPACT_PCT
     except:
-        return 0.0
+        return False
 
 async def check_liquidity(session, token_mint):
     try:
-        url = f"{JUPITER_API}/quote?inputMint=So11111111111111111111111111111111111111112&outputMint={token_mint}&amount=1000000000&slippageBps=1000"
+        url = f"{JUPITER_API}/quote?inputMint=So11111111111111111111111111111111111111112&outputMint={token_mint}&amount=1000000000&slippageBps=1500"
         async with session.get(url) as r:
             if r.status != 200:
                 return 0
@@ -82,23 +85,10 @@ async def check_liquidity(session, token_mint):
     except:
         return 0
 
-async def can_sell_token(session, token_mint):
-    try:
-        url = f"{JUPITER_API}/quote?inputMint={token_mint}&outputMint=So11111111111111111111111111111111111111112&amount=1000000&slippageBps=1000"
-        async with session.get(url) as r:
-            if r.status != 200:
-                return False
-            data = await r.json()
-            impact = float(data.get("priceImpactPct", 100))
-            return impact < MAX_PRICE_IMPACT_PCT
-    except:
-        return False
-
 async def check_mint_authority(session, token_mint):
     try:
         result = await helius_rpc(session, "getAccountInfo", [
-            token_mint,
-            {"encoding": "jsonParsed"}
+            token_mint, {"encoding": "jsonParsed"}
         ])
         if not result:
             return True
@@ -112,93 +102,15 @@ async def check_mint_authority(session, token_mint):
     except:
         return True
 
-async def check_top_holders(session, token_mint):
-    try:
-        url = f"{HELIUS_API}/token-holders?api-key={HELIUS_KEY}&mint={token_mint}&limit=10"
-        async with session.get(url) as r:
-            if r.status != 200:
-                return True
-            data = await r.json()
-            holders = data.get("result", [])
-            if not holders:
-                return True
-            total = sum(h.get("amount", 0) for h in holders)
-            if total == 0:
-                return True
-            top_holder = max(h.get("amount", 0) for h in holders)
-            top_pct = (top_holder / total) * 100
-            return top_pct > MAX_TOP_HOLDER_PCT
-    except:
-        return True
-
-async def get_wallet_age_days(session, wallet):
-    try:
-        result = await helius_rpc(session, "getSignaturesForAddress", [wallet, {"limit": 1000}])
-        if not result:
-            return 0
-        oldest = result[-1].get("blockTime", int(time.time()))
-        return (int(time.time()) - oldest) / 86400
-    except:
-        return 0
-
-async def get_whale_win_rate(session, wallet):
-    try:
-        url = f"{HELIUS_API}/addresses/{wallet}/transactions?api-key={HELIUS_KEY}&limit=50&type=SWAP"
-        async with session.get(url) as r:
-            if r.status != 200:
-                return 0
-            txs = await r.json()
-            if not txs or len(txs) < 5:
-                return 0
-            wins = 0
-            total = 0
-            for tx in txs[:20]:
-                swap = tx.get("events", {}).get("swap", {})
-                if swap:
-                    total += 1
-                    amount_out = swap.get("nativeOutput", {}).get("amount", 0)
-                    amount_in = swap.get("nativeInput", {}).get("amount", 0)
-                    if amount_out > amount_in:
-                        wins += 1
-            return wins / total if total > 0 else 0
-    except:
-        return 0
-
-async def score_whale(session, wallet):
-    score = 0
-    reasons = []
-
-    age_days = await get_wallet_age_days(session, wallet)
-    if age_days < MIN_WALLET_AGE_DAYS:
-        return 0, [f"Wallet changa sana: siku {age_days:.0f}"]
-    score += 30 if age_days > 180 else 15
-    reasons.append(f"Umri wa wallet: siku {age_days:.0f}")
-
-    win_rate = await get_whale_win_rate(session, wallet)
-    if win_rate < MIN_WHALE_WIN_RATE:
-        return 0, [f"Win rate mbaya: {win_rate*100:.0f}%"]
-    score += 40 if win_rate > 0.7 else 20
-    reasons.append(f"Win rate: {win_rate*100:.0f}%")
-
-    balance = await helius_rpc(session, "getBalance", [wallet])
-    if balance:
-        sol_balance = balance / 1e9
-        if sol_balance < 100:
-            return 0, [f"Balance ndogo: {sol_balance:.0f} SOL"]
-        score += 30 if sol_balance > 1000 else 15
-        reasons.append(f"Balance: {sol_balance:.0f} SOL")
-
-    return score, reasons
-
 async def safety_check(session, token_mint):
-    checks = {"passed": 0, "total": 5, "reasons": []}
+    checks = {"passed": 0, "total": 4, "reasons": []}
 
     dangerous_mint = await check_mint_authority(session, token_mint)
     if not dangerous_mint:
         checks["passed"] += 1
         checks["reasons"].append("✅ Mint authority imefungwa")
     else:
-        checks["reasons"].append("❌ Mint authority ipo")
+        checks["reasons"].append("❌ Mint authority ipo — hatari!")
 
     can_sell = await can_sell_token(session, token_mint)
     if can_sell:
@@ -214,24 +126,23 @@ async def safety_check(session, token_mint):
     else:
         checks["reasons"].append(f"❌ Liquidity ndogo: ${liquidity:.0f}")
 
-    bad_holders = await check_top_holders(session, token_mint)
-    if not bad_holders:
-        checks["passed"] += 1
-        checks["reasons"].append("✅ Holders wamegawanyika vizuri")
-    else:
-        checks["reasons"].append("❌ Holder mmoja ana zaidi ya 20%")
-
-    price = await get_token_price_usd(session, token_mint)
-    if price > 0:
-        checks["passed"] += 1
-        checks["reasons"].append(f"✅ Bei: ${price:.8f}")
-    else:
+    price_url = f"https://price.jup.ag/v4/price?ids={token_mint}"
+    try:
+        async with session.get(price_url) as r:
+            data = await r.json()
+            price = data.get("data", {}).get(token_mint, {}).get("price", 0)
+            if float(price) > 0:
+                checks["passed"] += 1
+                checks["reasons"].append(f"✅ Bei: ${float(price):.8f}")
+            else:
+                checks["reasons"].append("❌ Bei haipatikani")
+    except:
         checks["reasons"].append("❌ Bei haipatikani")
 
-    checks["safe"] = checks["passed"] >= 4
+    checks["safe"] = checks["passed"] >= 3
     return checks
 
-async def analyze_whale_transaction(session, wallet, signature):
+async def analyze_transaction(session, wallet, signature):
     try:
         result = await helius_rpc(session, "getTransaction", [
             signature,
@@ -246,7 +157,6 @@ async def analyze_whale_transaction(session, wallet, signature):
 
         pre_balances = meta.get("preTokenBalances", [])
         post_balances = meta.get("postTokenBalances", [])
-
         if not post_balances:
             return None
 
@@ -262,14 +172,13 @@ async def analyze_whale_transaction(session, wallet, signature):
                 sol_price = await get_sol_price(session)
                 pre_sol = meta.get("preBalances", [0])[0] / 1e9
                 post_sol = meta.get("postBalances", [0])[0] / 1e9
-                sol_spent = pre_sol - post_sol
+                sol_spent = abs(pre_sol - post_sol)
                 usd_spent = sol_spent * sol_price
                 if usd_spent >= MIN_WHALE_BUY_USD:
                     bought_tokens.append({
                         "mint": mint,
                         "sol_spent": sol_spent,
                         "usd_spent": usd_spent,
-                        "amount_received": post_amount - (pre_amount or 0)
                     })
 
         return bought_tokens if bought_tokens else None
@@ -280,7 +189,7 @@ async def analyze_whale_transaction(session, wallet, signature):
 
 async def process_opportunity(session, whale_wallet, token_info):
     mint = token_info["mint"]
-    log(f"Whale amenunua token: {mint[:8]}...")
+    log(f"Whale amenunua: {mint[:8]}...")
 
     alert_msg = (
         f"🎯 WHALE AMENUNUA TOKEN!\n"
@@ -291,25 +200,14 @@ async def process_opportunity(session, whale_wallet, token_info):
     )
     await send_telegram(session, alert_msg)
 
-    whale_score, whale_reasons = await score_whale(session, whale_wallet)
-    if whale_score < 60:
-        msg = (
-            f"❌ WHALE HAINA UBORA\n"
-            f"🪙 Token: {mint[:8]}...\n"
-            f"📊 Score: {whale_score}/100\n"
-            f"📝 {', '.join(whale_reasons)}"
-        )
-        await send_telegram(session, msg)
-        return
-
     safety = await safety_check(session, mint)
     safety_report = "\n".join(safety["reasons"])
-    await send_telegram(session, f"🔐 UCHUNGUZI WA TOKEN\n🪙 {mint[:8]}...\n{safety_report}")
+    await send_telegram(session, f"🔐 UCHUNGUZI:\n🪙 {mint[:8]}...\n{safety_report}")
 
     if not safety["safe"]:
         msg = (
             f"🚫 TOKEN IMEZUIWA!\n"
-            f"🪙 Token: {mint[:8]}...\n"
+            f"🪙 {mint[:8]}...\n"
             f"⚠️ Rug pull / Honeypot / Scam!"
         )
         await send_telegram(session, msg)
@@ -317,10 +215,9 @@ async def process_opportunity(session, whale_wallet, token_info):
 
     mode = "🧪 SIMULATION" if DRY_RUN else "🔴 LIVE"
     msg = (
-        f"✅ TOKEN SALAMA — INANUNUA!\n"
+        f"✅ TOKEN SALAMA!\n"
         f"🪙 Token: {mint[:8]}...\n"
         f"💰 Whale alitumia: ${token_info['usd_spent']:.0f}\n"
-        f"📊 Whale Score: {whale_score}/100\n"
         f"💸 Kununua: {BUY_AMOUNT_SOL} SOL\n"
         f"{mode}"
     )
@@ -332,7 +229,9 @@ async def watch_whale(session, wallet):
 
     while True:
         try:
-            sigs = await helius_rpc(session, "getSignaturesForAddress", [wallet, {"limit": 5}])
+            sigs = await helius_rpc(session, "getSignaturesForAddress", [
+                wallet, {"limit": 5}
+            ])
             if not sigs:
                 await asyncio.sleep(5)
                 continue
@@ -340,11 +239,11 @@ async def watch_whale(session, wallet):
             latest_sig = sigs[0]["signature"]
             if last_sig is None:
                 last_sig = latest_sig
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
                 continue
 
             if latest_sig == last_sig:
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
                 continue
 
             new_sigs = []
@@ -356,7 +255,7 @@ async def watch_whale(session, wallet):
             last_sig = latest_sig
 
             for sig in new_sigs:
-                bought = await analyze_whale_transaction(session, wallet, sig)
+                bought = await analyze_transaction(session, wallet, sig)
                 if bought:
                     for token_info in bought:
                         await process_opportunity(session, wallet, token_info)
@@ -371,10 +270,10 @@ async def main():
     async with aiohttp.ClientSession() as session:
         start_msg = (
             f"🤖 SOLANA WHALE SNIPER BOT!\n"
-            f"🔍 Whales zinazofuatiliwa: {len(WHALE_WALLETS)}\n"
-            f"🛡️ Filters: Honeypot, Rug Pull, Scam, Fake Whale\n"
-            f"💰 Min Whale Buy: ${MIN_WHALE_BUY_USD}\n"
+            f"🔍 Whales: {len(WHALE_WALLETS)}\n"
+            f"💰 Min Buy: ${MIN_WHALE_BUY_USD}\n"
             f"💧 Min Liquidity: ${MIN_LIQUIDITY_USD}\n"
+            f"🛡️ Filters: Honeypot, Rug Pull, Scam\n"
             f"🧪 Mode: {'SIMULATION' if DRY_RUN else 'LIVE'}"
         )
         log(start_msg)
