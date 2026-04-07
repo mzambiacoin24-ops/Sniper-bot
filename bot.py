@@ -14,7 +14,7 @@ CURRENT_TOKEN = None
 ENTRY_TIME = 0
 
 TP_TIME = 120
-SL_TIME = 50
+SL_TIME = 60
 
 seen_counts = {}
 
@@ -33,8 +33,10 @@ def extract_mints(tx):
     except:
         return []
 
-# 🔥 SMART DETECTION (MULTI-HIT)
+# 🔥 STRONG TOKEN (WITH MOMENTUM CHECK)
 async def find_strong_token(session):
+    global seen_counts
+
     sigs = await rpc(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":20}])
 
     for s in sigs:
@@ -47,9 +49,29 @@ async def find_strong_token(session):
         for mint in mints:
             seen_counts[mint] = seen_counts.get(mint, 0) + 1
 
-            # 🚀 lazima ionekane mara 3
+            # lazima ionekane mara 3
             if seen_counts[mint] >= 3:
-                return mint
+
+                # ⏳ SUBIRI kidogo (momentum test)
+                await asyncio.sleep(6)
+
+                sigs2 = await rpc(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":10}])
+
+                still_alive = False
+
+                for s2 in sigs2:
+                    tx2 = await rpc(session, "getTransaction", [s2["signature"], {"encoding":"json"}])
+                    if not tx2:
+                        continue
+
+                    mints2 = extract_mints(tx2)
+
+                    if mint in mints2:
+                        still_alive = True
+                        break
+
+                if still_alive:
+                    return mint
 
     return None
 
@@ -58,7 +80,7 @@ async def sniper():
     global ACTIVE_TRADE, CURRENT_TOKEN, ENTRY_TIME
 
     async with aiohttp.ClientSession() as session:
-        await send(session, "🤖 SMART SNIPER (ANTI-SL MODE)")
+        await send(session, "🤖 ULTRA SNIPER (ANTI-SL)")
 
         while True:
 
@@ -72,7 +94,6 @@ async def sniper():
                 await asyncio.sleep(2)
                 continue
 
-            # 🚀 BUY
             ACTIVE_TRADE = True
             CURRENT_TOKEN = mint
             ENTRY_TIME = time.time()
