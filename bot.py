@@ -3,10 +3,16 @@ import aiohttp
 import time
 from datetime import datetime
 import os
+import base58
+
+from solana.rpc.async_api import AsyncClient
+from solders.keypair import Keypair
+from solders.system_program import transfer, TransferParams
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 HELIUS_RPC = os.getenv("HELIUS_RPC")
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 
 PUMPFUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -40,6 +46,41 @@ async def helius(session, method, params):
         data = await r.json()
         return data.get("result")
 
+def load_wallet():
+    secret = base58.b58decode(PRIVATE_KEY)
+    return Keypair.from_bytes(secret)
+
+# 🔥 TEST REAL TRANSACTION
+async def real_buy(session, mint):
+    try:
+        client = AsyncClient(HELIUS_RPC)
+
+        wallet = load_wallet()
+
+        lamports = 1000000  # 0.001 SOL (SAFE TEST)
+
+        tx = transfer(
+            TransferParams(
+                from_pubkey=wallet.pubkey(),
+                to_pubkey=wallet.pubkey(),
+                lamports=lamports
+            )
+        )
+
+        result = await client.send_transaction(tx, wallet)
+
+        log(f"TX SENT: {result}")
+
+        await client.close()
+        return True
+
+    except Exception as e:
+        log(f"ERROR: {e}")
+        return False
+
+async def buy_token(session, mint):
+    return await real_buy(session, mint)
+
 # 🔍 TOKEN DETECTION
 async def get_tokens(session, sig):
     try:
@@ -53,88 +94,46 @@ async def get_tokens(session, sig):
         for i in instructions:
             info = i.get("parsed", {}).get("info", {})
             mint = info.get("mint")
-            owner = info.get("owner")
 
             if mint and mint != SOL_MINT and mint not in seen_mints:
                 seen_mints.add(mint)
-                tokens.append((mint, owner or "unknown"))
+                tokens.append(mint)
 
         return tokens
     except:
         return []
 
-# 🔥 SMART FILTER (ANTI-RUG BASIC)
 def pass_filters(mint):
-    # epuka weird tokens (basic safety)
-    if len(mint) < 30:
-        return False
-    return True
+    return len(mint) > 30
 
 # 🚀 SNIPE
-async def snipe(session, mint, owner):
+async def snipe(session, mint):
     global ACTIVE_TRADE
 
     if ACTIVE_TRADE:
         return
 
-    if mint in sniped_tokens:
-        return
-
     if not pass_filters(mint):
         return
 
-    # 🚀 EARLY ENTRY (NO JUPITER)
-    entry_price = 0.0000001
-
-    stats["sniped"] += 1
     ACTIVE_TRADE = True
+    stats["sniped"] += 1
 
-    sniped_tokens[mint] = {
-        "entry": entry_price,
-        "time": time.time(),
-        "sold": False
-    }
+    await send(session, f"🚀 BUYING {mint[:6]}...")
 
-    msg = (
-        f"🚀 PRO SNIPE!\n"
-        f"🪙 {mint[:6]}...\n"
-        f"⚡ Entry: EARLY\n"
-    )
+    bought = await buy_token(session, mint)
 
-    await send(session, msg)
+    if not bought:
+        ACTIVE_TRADE = False
+        return
 
-    asyncio.create_task(monitor(session, mint))
+    await send(session, f"✅ TX SENT {mint[:6]}")
 
-# 🔄 MONITOR
-async def monitor(session, mint):
-    global ACTIVE_TRADE
-
-    pos = sniped_tokens[mint]
-
-    import random
-
-    while not pos["sold"]:
-        mult = random.uniform(0.6, 3.5)
-
-        if mult >= TAKE_PROFIT_X:
-            stats["wins"] += 1
-            pos["sold"] = True
-            ACTIVE_TRADE = False
-            await send(session, f"💰 TP HIT {mint[:6]} {mult:.2f}x")
-            break
-
-        if mult <= (1 - STOP_LOSS_PCT):
-            stats["losses"] += 1
-            pos["sold"] = True
-            ACTIVE_TRADE = False
-            await send(session, f"🛑 SL HIT {mint[:6]}")
-            break
-
-        await asyncio.sleep(5)
+    ACTIVE_TRADE = False
 
 # 🔎 SCAN
 async def scan(session):
-    await send(session, "🚀 PRO SNIPER (FAST MODE)")
+    await send(session, "🚀 REAL SNIPER (TEST MODE)")
 
     last = None
 
@@ -161,17 +160,12 @@ async def scan(session):
             if new:
                 last = sigs[0]["signature"]
 
-                for sig in new[:5]:
-                    if sig in processed_sigs:
-                        continue
-
-                    processed_sigs.add(sig)
-
+                for sig in new[:3]:
                     tokens = await get_tokens(session, sig)
 
-                    for mint, owner in tokens:
+                    for mint in tokens:
                         stats["launches"] += 1
-                        await snipe(session, mint, owner)
+                        await snipe(session, mint)
 
             await asyncio.sleep(2)
 
@@ -184,16 +178,15 @@ async def stats_loop(session):
     while True:
         await asyncio.sleep(300)
         msg = (
-            f"📊 PRO REPORT\n"
+            f"📊 REPORT\n"
             f"🚀 Launches: {stats['launches']}\n"
-            f"🎯 Sniped: {stats['sniped']}\n"
-            f"✅ Wins: {stats['wins']} | ❌ Losses: {stats['losses']}"
+            f"🎯 Sniped: {stats['sniped']}"
         )
         await send(session, msg)
 
 async def main():
     async with aiohttp.ClientSession() as session:
-        await send(session, "🚀 BOT STARTED (FAST REAL MODE)")
+        await send(session, "🚀 BOT STARTED (REAL TEST MODE)")
 
         await asyncio.gather(
             scan(session),
