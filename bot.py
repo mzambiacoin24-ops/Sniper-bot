@@ -13,6 +13,24 @@ HELIUS_RPC = os.getenv("HELIUS_RPC")
 def load_wallet():
     return Keypair.from_bytes(base58.b58decode(PRIVATE_KEY))
 
+async def get_json(session, url):
+    for _ in range(3):  # retry mara 3
+        try:
+            async with session.get(url) as r:
+                return await r.json()
+        except:
+            await asyncio.sleep(2)
+    return None
+
+async def post_json(session, url, payload):
+    for _ in range(3):
+        try:
+            async with session.post(url, json=payload) as r:
+                return await r.json()
+        except:
+            await asyncio.sleep(2)
+    return None
+
 async def real_buy(mint):
     try:
         print("START BUY...")
@@ -34,12 +52,11 @@ async def real_buy(mint):
 
             print("GET QUOTE...")
 
-            quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint={mint}&amount={amount}&slippageBps=1500"
+            quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint=So11111111111111111111111111111111111111112&outputMint={mint}&amount={amount}&slippageBps=1500"
 
-            async with session.get(quote_url) as r:
-                quote = await r.json()
+            quote = await get_json(session, quote_url)
 
-            if "data" not in quote or not quote["data"]:
+            if not quote or "data" not in quote or not quote["data"]:
                 print("No route")
                 return False
 
@@ -47,15 +64,19 @@ async def real_buy(mint):
 
             print("GET SWAP TX...")
 
-            swap_url = "https://quote-api.jup.ag/v6/swap"
+            swap_url = "https://api.jup.ag/swap/v1/swap"
+
             payload = {
                 "route": route,
                 "userPublicKey": str(owner),
                 "wrapUnwrapSOL": True
             }
 
-            async with session.post(swap_url, json=payload) as r:
-                swap_data = await r.json()
+            swap_data = await post_json(session, swap_url, payload)
+
+            if not swap_data:
+                print("Swap error")
+                return False
 
             tx_base64 = swap_data.get("swapTransaction")
             if not tx_base64:
@@ -66,8 +87,6 @@ async def real_buy(mint):
 
             tx_bytes = base64.b64decode(tx_base64)
             tx = VersionedTransaction.from_bytes(tx_bytes)
-
-            # 🔥 SIGN FIX
             tx = VersionedTransaction(tx.message, [wallet])
 
             print("SENDING TX...")
@@ -95,7 +114,6 @@ async def main():
         print("BUY SUCCESS")
     else:
         print("BUY FAILED")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
