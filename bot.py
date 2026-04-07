@@ -1,119 +1,149 @@
 import asyncio
 import aiohttp
-import base64
-import base58
+import time
 import os
-from solana.rpc.async_api import AsyncClient
-from solders.keypair import Keypair
-from solders.transaction import VersionedTransaction
 
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-HELIUS_RPC = os.getenv("HELIUS_RPC")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-def load_wallet():
-    return Keypair.from_bytes(base58.b58decode(PRIVATE_KEY))
+ACTIVE_TRADE = False
+seen_tokens = set()
+positions = {}
 
-async def get_json(session, url):
-    for _ in range(3):  # retry mara 3
-        try:
-            async with session.get(url) as r:
-                return await r.json()
-        except:
-            await asyncio.sleep(2)
-    return None
+# SETTINGS
+MIN_BUYERS = 50
+MIN_VOLUME = 2
+MIN_MC = 3000
+MAX_MC = 60000
 
-async def post_json(session, url, payload):
-    for _ in range(3):
-        try:
-            async with session.post(url, json=payload) as r:
-                return await r.json()
-        except:
-            await asyncio.sleep(2)
-    return None
+STOP_LOSS = 0.30
 
-async def real_buy(mint):
+async def send(session, msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    await session.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+
+async def fetch_tokens(session):
     try:
-        print("START BUY...")
+        url = "https://pump.fun/api/recent"
+        async with session.get(url) as r:
+            data = await r.json()
+            return data[:10]
+    except:
+        return []
 
-        wallet = load_wallet()
-        client = AsyncClient(HELIUS_RPC)
-        owner = wallet.pubkey()
+def pass_filters(t):
+    return (
+        t.get("num_buyers", 0) >= MIN_BUYERS and
+        t.get("volume", 0) >= MIN_VOLUME and
+        MIN_MC <= t.get("market_cap", 0) <= MAX_MC
+    )
 
-        balance = await client.get_balance(owner)
-        amount = int(balance.value * 0.5)
+async def snipe(session, t):
+    global ACTIVE_TRADE
 
-        print("BALANCE:", balance.value)
+    mint = t.get("mint")
+    mc = t.get("market_cap", 0)
 
-        if amount < 10000:
-            print("Balance ndogo sana")
-            return False
+    if not mint or mint in seen_tokens:
+        return
 
-        async with aiohttp.ClientSession() as session:
+    seen_tokens.add(mint)
 
-            print("GET QUOTE...")
+    if ACTIVE_TRADE:
+        return
 
-            quote_url = f"https://api.jup.ag/swap/v1/quote?inputMint=So11111111111111111111111111111111111111112&outputMint={mint}&amount={amount}&slippageBps=1500"
+    if not pass_filters(t):
+        return
 
-            quote = await get_json(session, quote_url)
+    ACTIVE_TRADE = True
 
-            if not quote or "data" not in quote or not quote["data"]:
-                print("No route")
-                return False
+    positions[mint] = {
+        "entry_mc": mc,
+        "highest_mc": mc,
+        "sold": False
+    }
 
-            route = quote["data"][0]
+    await send(session,
+        f"🚀 BUY\n"
+        f"🪙 {mint}\n"
+        f"🔗 https://pump.fun/{mint}\n"
+        f"📊 Entry MC: ${mc}"
+    )
 
-            print("GET SWAP TX...")
+    asyncio.create_task(monitor(session, mint))
 
-            swap_url = "https://api.jup.ag/swap/v1/swap"
+async def monitor(session, mint):
+    global ACTIVE_TRADE
 
-            payload = {
-                "route": route,
-                "userPublicKey": str(owner),
-                "wrapUnwrapSOL": True
-            }
+    while not positions[mint]["sold"]:
+        try:
+            async with aiohttp.ClientSession() as s:
+                data = await fetch_tokens(s)
 
-            swap_data = await post_json(session, swap_url, payload)
+            token = next((x for x in data if x.get("mint") == mint), None)
 
-            if not swap_data:
-                print("Swap error")
-                return False
+            if not token:
+                await asyncio.sleep(5)
+                continue
 
-            tx_base64 = swap_data.get("swapTransaction")
-            if not tx_base64:
-                print("No tx")
-                return False
+            current_mc = token.get("market_cap", 0)
+            entry_mc = positions[mint]["entry_mc"]
 
-            print("SIGNING TX...")
+            # update peak
+            if current_mc > positions[mint]["highest_mc"]:
+                positions[mint]["highest_mc"] = current_mc
 
-            tx_bytes = base64.b64decode(tx_base64)
-            tx = VersionedTransaction.from_bytes(tx_bytes)
-            tx = VersionedTransaction(tx.message, [wallet])
+            highest = positions[mint]["highest_mc"]
 
-            print("SENDING TX...")
+            # 🔥 DYNAMIC TP (TRAILING)
+            drop_from_peak = (highest - current_mc) / highest if highest > 0 else 0
 
-            result = await client.send_raw_transaction(bytes(tx))
+            # 💰 TAKE PROFIT (trailing)
+            if highest >= entry_mc * 2 and drop_from_peak >= 0.25:
+                positions[mint]["sold"] = True
+                ACTIVE_TRADE = False
 
-            print("TX SENT:", result)
+                await send(session,
+                    f"💰 SELL (TRAILING TP)\n"
+                    f"🪙 {mint}\n"
+                    f"📊 Peak MC: ${highest}\n"
+                    f"📊 Exit MC: ${current_mc}\n"
+                    f"🔗 https://pump.fun/{mint}"
+                )
+                break
 
-        await client.close()
-        return True
+            # 🛑 STOP LOSS
+            if current_mc <= entry_mc * (1 - STOP_LOSS):
+                positions[mint]["sold"] = True
+                ACTIVE_TRADE = False
 
-    except Exception as e:
-        print("ERROR:", e)
-        return False
+                await send(session,
+                    f"🛑 SELL (SL)\n"
+                    f"🪙 {mint}\n"
+                    f"📉 MC: ${current_mc}\n"
+                    f"🔗 https://pump.fun/{mint}"
+                )
+                break
 
+            await asyncio.sleep(5)
+
+        except:
+            await asyncio.sleep(5)
+
+async def scanner(session):
+    await send(session, "🚀 REAL BONDING SNIPER STARTED")
+
+    while True:
+        tokens = await fetch_tokens(session)
+
+        for t in tokens:
+            await snipe(session, t)
+
+        await asyncio.sleep(3)
 
 async def main():
-    print("BOT STARTED...")
-
-    mint = "So11111111111111111111111111111111111111112"
-
-    success = await real_buy(mint)
-
-    if success:
-        print("BUY SUCCESS")
-    else:
-        print("BUY FAILED")
+    async with aiohttp.ClientSession() as session:
+        await scanner(session)
 
 if __name__ == "__main__":
     asyncio.run(main())
