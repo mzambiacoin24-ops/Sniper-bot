@@ -14,8 +14,9 @@ CURRENT_TOKEN = None
 
 ENTRY_TIME = 0
 
-TP_TIME = 90   # sekunde ~ trend nzuri
-SL_TIME = 30   # sekunde ~ weak coin
+BUY_DELAY = 12   # ⏱️ subiri kabla ya kuingia
+TP_TIME = 120    # 💰 strong coin
+SL_TIME = 40     # 🛑 weak coin
 
 async def send(session, msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -26,51 +27,68 @@ async def rpc(session, method, params):
     async with session.post(HELIUS_RPC, json=payload) as r:
         return (await r.json()).get("result")
 
-# 🔥 TOKEN DETECTION
 async def extract_mints(tx):
     try:
         return [t["mint"] for t in tx["meta"]["postTokenBalances"]]
     except:
         return []
 
-# 🚀 BUY LOGIC (SINGLE TOKEN)
-async def try_buy(session, mint):
+# 🚀 SMART BUY (DELAY + CONFIRM)
+async def smart_buy(session, mint):
     global ACTIVE_TRADE, CURRENT_TOKEN, ENTRY_TIME
 
     if ACTIVE_TRADE:
         return
 
+    await send(session, f"⏳ WAITING CONFIRM\n{mint}")
+
+    await asyncio.sleep(BUY_DELAY)
+
+    # 🔍 confirm bado kuna activity
+    sigs = await rpc(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":10}])
+
+    still_active = False
+
+    for s in sigs:
+        tx = await rpc(session, "getTransaction", [s["signature"], {"encoding":"json"}])
+        if not tx:
+            continue
+
+        mints = await extract_mints(tx)
+        if mint in mints:
+            still_active = True
+            break
+
+    if not still_active:
+        await send(session, f"❌ SKIPPED (DEAD TOKEN)\n{mint}")
+        return
+
+    # 🚀 BUY CONFIRMED
     ACTIVE_TRADE = True
     CURRENT_TOKEN = mint
     ENTRY_TIME = time.time()
 
     await send(session,
-        f"🚀 BUY NOW\n{mint}\nhttps://pump.fun/{mint}"
+        f"🚀 BUY CONFIRMED\n{mint}\nhttps://pump.fun/{mint}"
     )
 
     asyncio.create_task(monitor_trade(session))
 
-# 🔄 MONITOR TRADE
+# 🔄 MONITOR
 async def monitor_trade(session):
     global ACTIVE_TRADE, CURRENT_TOKEN
 
     while ACTIVE_TRADE:
         elapsed = time.time() - ENTRY_TIME
 
-        # 💰 TAKE PROFIT (strong coin)
         if elapsed >= TP_TIME:
-            await send(session,
-                f"💰 SELL (TP)\n{CURRENT_TOKEN}"
-            )
+            await send(session, f"💰 SELL (TP)\n{CURRENT_TOKEN}")
             ACTIVE_TRADE = False
             CURRENT_TOKEN = None
             break
 
-        # 🛑 STOP LOSS (weak coin)
         if elapsed >= SL_TIME and elapsed < TP_TIME:
-            await send(session,
-                f"🛑 SELL (SL)\n{CURRENT_TOKEN}"
-            )
+            await send(session, f"🛑 SELL (SL)\n{CURRENT_TOKEN}")
             ACTIVE_TRADE = False
             CURRENT_TOKEN = None
             break
@@ -80,7 +98,7 @@ async def monitor_trade(session):
 # 🔎 SCANNER
 async def scan():
     async with aiohttp.ClientSession() as session:
-        await send(session, "🔥 SNIPER READY (SINGLE TRADE MODE)")
+        await send(session, "🔥 SMART SNIPER READY")
 
         last = None
 
@@ -114,7 +132,7 @@ async def scan():
 
                     for mint in mints:
                         if not ACTIVE_TRADE:
-                            await try_buy(session, mint)
+                            asyncio.create_task(smart_buy(session, mint))
 
             await asyncio.sleep(2)
 
