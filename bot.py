@@ -17,21 +17,7 @@ PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 PUMPFUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
-TAKE_PROFIT_X = 2.5
-STOP_LOSS_PCT = 0.30
-
-sniped_tokens = {}
-processed_sigs = set()
-seen_mints = set()
-
 ACTIVE_TRADE = False
-
-stats = {
-    "launches": 0,
-    "sniped": 0,
-    "wins": 0,
-    "losses": 0
-}
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
@@ -50,14 +36,13 @@ def load_wallet():
     secret = base58.b58decode(PRIVATE_KEY)
     return Keypair.from_bytes(secret)
 
-# 🔥 TEST REAL TRANSACTION
+# 🔥 TEST TRANSACTION (REAL)
 async def real_buy(session, mint):
     try:
         client = AsyncClient(HELIUS_RPC)
-
         wallet = load_wallet()
 
-        lamports = 1000000  # 0.001 SOL (SAFE TEST)
+        lamports = 1000000  # 0.001 SOL
 
         tx = transfer(
             TransferParams(
@@ -78,10 +63,6 @@ async def real_buy(session, mint):
         log(f"ERROR: {e}")
         return False
 
-async def buy_token(session, mint):
-    return await real_buy(session, mint)
-
-# 🔍 TOKEN DETECTION
 async def get_tokens(session, sig):
     try:
         tx = await helius(session, "getTransaction", [sig, {"encoding":"jsonParsed"}])
@@ -95,8 +76,7 @@ async def get_tokens(session, sig):
             info = i.get("parsed", {}).get("info", {})
             mint = info.get("mint")
 
-            if mint and mint != SOL_MINT and mint not in seen_mints:
-                seen_mints.add(mint)
+            if mint and mint != SOL_MINT:
                 tokens.append(mint)
 
         return tokens
@@ -106,7 +86,7 @@ async def get_tokens(session, sig):
 def pass_filters(mint):
     return len(mint) > 30
 
-# 🚀 SNIPE
+# 🚀 SNIPE (FIXED — NO SPAM)
 async def snipe(session, mint):
     global ACTIVE_TRADE
 
@@ -117,17 +97,15 @@ async def snipe(session, mint):
         return
 
     ACTIVE_TRADE = True
-    stats["sniped"] += 1
 
     await send(session, f"🚀 BUYING {mint[:6]}...")
 
-    bought = await buy_token(session, mint)
+    success = await real_buy(session, mint)
 
-    if not bought:
-        ACTIVE_TRADE = False
-        return
-
-    await send(session, f"✅ TX SENT {mint[:6]}")
+    if success:
+        await send(session, f"✅ TX SENT {mint[:6]}")
+    else:
+        await send(session, f"❌ FAILED {mint[:6]}")
 
     ACTIVE_TRADE = False
 
@@ -139,7 +117,7 @@ async def scan(session):
 
     while True:
         try:
-            sigs = await helius(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":20}])
+            sigs = await helius(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":10}])
 
             if not sigs:
                 await asyncio.sleep(2)
@@ -160,11 +138,10 @@ async def scan(session):
             if new:
                 last = sigs[0]["signature"]
 
-                for sig in new[:3]:
+                for sig in new[:2]:
                     tokens = await get_tokens(session, sig)
 
                     for mint in tokens:
-                        stats["launches"] += 1
                         await snipe(session, mint)
 
             await asyncio.sleep(2)
@@ -173,25 +150,10 @@ async def scan(session):
             log(e)
             await asyncio.sleep(5)
 
-# 📊 REPORT
-async def stats_loop(session):
-    while True:
-        await asyncio.sleep(300)
-        msg = (
-            f"📊 REPORT\n"
-            f"🚀 Launches: {stats['launches']}\n"
-            f"🎯 Sniped: {stats['sniped']}"
-        )
-        await send(session, msg)
-
 async def main():
     async with aiohttp.ClientSession() as session:
         await send(session, "🚀 BOT STARTED (REAL TEST MODE)")
-
-        await asyncio.gather(
-            scan(session),
-            stats_loop(session)
-        )
+        await scan(session)
 
 if __name__ == "__main__":
     asyncio.run(main())
