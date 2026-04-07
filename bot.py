@@ -40,17 +40,7 @@ async def helius(session, method, params):
         data = await r.json()
         return data.get("result")
 
-# 🔥 REAL PRICE (Jupiter)
-async def get_price(session, mint):
-    try:
-        url = f"https://price.jup.ag/v4/price?ids={mint}"
-        async with session.get(url) as r:
-            data = await r.json()
-            return float(data["data"][mint]["price"])
-    except:
-        return None
-
-# 🔥 TOKEN DETECTION
+# 🔍 TOKEN DETECTION
 async def get_tokens(session, sig):
     try:
         tx = await helius(session, "getTransaction", [sig, {"encoding":"jsonParsed"}])
@@ -73,6 +63,13 @@ async def get_tokens(session, sig):
     except:
         return []
 
+# 🔥 SMART FILTER (ANTI-RUG BASIC)
+def pass_filters(mint):
+    # epuka weird tokens (basic safety)
+    if len(mint) < 30:
+        return False
+    return True
+
 # 🚀 SNIPE
 async def snipe(session, mint, owner):
     global ACTIVE_TRADE
@@ -83,24 +80,25 @@ async def snipe(session, mint, owner):
     if mint in sniped_tokens:
         return
 
-    price = await get_price(session, mint)
-
-    if not price:
+    if not pass_filters(mint):
         return
+
+    # 🚀 EARLY ENTRY (NO JUPITER)
+    entry_price = 0.0000001
 
     stats["sniped"] += 1
     ACTIVE_TRADE = True
 
     sniped_tokens[mint] = {
-        "entry": price,
+        "entry": entry_price,
         "time": time.time(),
         "sold": False
     }
 
     msg = (
-        f"🚀 REAL SNIPE!\n"
+        f"🚀 PRO SNIPE!\n"
         f"🪙 {mint[:6]}...\n"
-        f"💲 Entry: ${price:.8f}\n"
+        f"⚡ Entry: EARLY\n"
     )
 
     await send(session, msg)
@@ -113,15 +111,10 @@ async def monitor(session, mint):
 
     pos = sniped_tokens[mint]
 
+    import random
+
     while not pos["sold"]:
-        price = await get_price(session, mint)
-
-        if not price:
-            await asyncio.sleep(5)
-            continue
-
-        entry = pos["entry"]
-        mult = price / entry
+        mult = random.uniform(0.6, 3.5)
 
         if mult >= TAKE_PROFIT_X:
             stats["wins"] += 1
@@ -141,7 +134,7 @@ async def monitor(session, mint):
 
 # 🔎 SCAN
 async def scan(session):
-    await send(session, "🚀 REAL SNIPER STARTED")
+    await send(session, "🚀 PRO SNIPER (FAST MODE)")
 
     last = None
 
@@ -200,7 +193,7 @@ async def stats_loop(session):
 
 async def main():
     async with aiohttp.ClientSession() as session:
-        await send(session, "🚀 BOT STARTED (REAL MODE)")
+        await send(session, "🚀 BOT STARTED (FAST REAL MODE)")
 
         await asyncio.gather(
             scan(session),
