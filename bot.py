@@ -1,8 +1,6 @@
 import asyncio
 import aiohttp
 import os
-import base64
-import struct
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -10,11 +8,7 @@ HELIUS_RPC = os.getenv("HELIUS_RPC")
 
 PUMPFUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 
-ACTIVE_TRADE = False
 seen = set()
-positions = {}
-
-STOP_LOSS = 0.30
 
 async def send(session, msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -25,109 +19,31 @@ async def rpc(session, method, params):
     async with session.post(HELIUS_RPC, json=payload) as r:
         return (await r.json()).get("result")
 
-async def get_account(session, acc):
-    res = await rpc(session, "getAccountInfo", [acc, {"encoding":"base64"}])
-    if not res or not res.get("value"):
-        return None
-    return base64.b64decode(res["value"]["data"][0])
+# 🔥 REAL TOKEN DETECTION
+async def extract_mints(tx):
+    mints = []
 
-def calc_price(data):
     try:
-        sol = struct.unpack_from("<Q", data, 8)[0]
-        tok = struct.unpack_from("<Q", data, 16)[0]
-        if tok == 0:
-            return 0
-        return sol / tok
+        post = tx["meta"]["postTokenBalances"]
+
+        for t in post:
+            mint = t.get("mint")
+            if mint and mint not in seen:
+                seen.add(mint)
+                mints.append(mint)
+
     except:
-        return 0
+        pass
 
-# 🔥 REAL BONDING EXTRACTION
-def extract_bonding(tx):
-    try:
-        instructions = tx["transaction"]["message"]["instructions"]
-        keys = tx["transaction"]["message"]["accountKeys"]
+    return mints
 
-        for ins in instructions:
-            if ins.get("programId") == PUMPFUN_PROGRAM:
-                accounts = ins.get("accounts", [])
+async def scan():
+    async with aiohttp.ClientSession() as session:
+        await send(session, "🔥 REAL DETECTOR STARTED")
 
-                # 👉 bonding account ipo hapa index 3 (pump.fun pattern)
-                if len(accounts) > 3:
-                    return keys[accounts[3]]
+        last = None
 
-        return None
-    except:
-        return None
-
-async def snipe(session, mint, bonding):
-    global ACTIVE_TRADE
-
-    if ACTIVE_TRADE:
-        return
-
-    data = await get_account(session, bonding)
-    if not data:
-        return
-
-    price = calc_price(data)
-    if price == 0:
-        return
-
-    ACTIVE_TRADE = True
-
-    positions[mint] = {
-        "entry": price,
-        "peak": price,
-        "bonding": bonding
-    }
-
-    await send(session,
-        f"🚀 BUY\n{mint}\n🔗 https://pump.fun/{mint}\n💰 Price: {price:.8f}"
-    )
-
-    asyncio.create_task(monitor(session, mint))
-
-async def monitor(session, mint):
-    global ACTIVE_TRADE
-
-    pos = positions[mint]
-
-    while True:
-        data = await get_account(session, pos["bonding"])
-        if not data:
-            await asyncio.sleep(2)
-            continue
-
-        price = calc_price(data)
-
-        if price > pos["peak"]:
-            pos["peak"] = price
-
-        drop = (pos["peak"] - price) / pos["peak"]
-
-        if pos["peak"] >= pos["entry"] * 2 and drop >= 0.25:
-            ACTIVE_TRADE = False
-            await send(session,
-                f"💰 SELL\n{mint}\n📈 Peak: {pos['peak']:.8f}\n📉 Exit: {price:.8f}"
-            )
-            break
-
-        if price <= pos["entry"] * (1 - STOP_LOSS):
-            ACTIVE_TRADE = False
-            await send(session,
-                f"🛑 SELL\n{mint}\nPrice: {price:.8f}"
-            )
-            break
-
-        await asyncio.sleep(3)
-
-async def scan(session):
-    await send(session, "🔥 REAL SNIPER LIVE (FIXED)")
-
-    last = None
-
-    while True:
-        try:
+        while True:
             sigs = await rpc(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":20}])
 
             if not sigs:
@@ -153,34 +69,14 @@ async def scan(session):
                     if not tx:
                         continue
 
-                    mint = None
-                    try:
-                        for ins in tx["transaction"]["message"]["instructions"]:
-                            mint = ins.get("parsed", {}).get("info", {}).get("mint")
-                            if mint:
-                                break
-                    except:
-                        continue
+                    mints = await extract_mints(tx)
 
-                    if not mint or mint in seen:
-                        continue
-
-                    seen.add(mint)
-
-                    bonding = extract_bonding(tx)
-                    if not bonding:
-                        continue
-
-                    await snipe(session, mint, bonding)
+                    for mint in mints:
+                        await send(session,
+                            f"🆕 TOKEN DETECTED\n{mint}\nhttps://pump.fun/{mint}"
+                        )
 
             await asyncio.sleep(2)
 
-        except:
-            await asyncio.sleep(3)
-
-async def main():
-    async with aiohttp.ClientSession() as session:
-        await scan(session)
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(scan())
