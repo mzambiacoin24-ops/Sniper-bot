@@ -18,6 +18,9 @@ sniped_tokens = {}
 processed_sigs = set()
 seen_mints = set()
 
+# 🔒 SINGLE TRADE CONTROL
+ACTIVE_TRADE = False
+
 stats = {
     "launches": 0,
     "sniped": 0,
@@ -38,7 +41,7 @@ async def helius(session, method, params):
         data = await r.json()
         return data.get("result")
 
-# 🔥 DETECT TOKENS
+# 🔥 TOKEN DETECTION
 async def get_tokens(session, sig):
     try:
         tx = await helius(session, "getTransaction", [sig, {"encoding":"jsonParsed"}])
@@ -61,7 +64,7 @@ async def get_tokens(session, sig):
     except:
         return []
 
-# 🔥 FAKE EARLY DATA (PRO SIMULATION)
+# 🔥 SIMULATION METRICS (PRO LOGIC)
 def generate_metrics():
     import random
     buyers = random.randint(20, 300)
@@ -70,7 +73,7 @@ def generate_metrics():
     momentum = random.uniform(0, 1)
     return buyers, volume, mcap, momentum
 
-# 🔥 PRO FILTER
+# 🔥 FILTER
 def pass_filters(buyers, volume, mcap, momentum):
     if buyers < 80:
         return False
@@ -82,8 +85,14 @@ def pass_filters(buyers, volume, mcap, momentum):
         return False
     return True
 
-# 🚀 SNIPE
+# 🚀 SNIPE (SINGLE TRADE MODE)
 async def snipe(session, mint, owner):
+    global ACTIVE_TRADE
+
+    # 🔒 kama kuna trade inaendelea → skip
+    if ACTIVE_TRADE:
+        return
+
     if mint in sniped_tokens:
         return
 
@@ -95,6 +104,7 @@ async def snipe(session, mint, owner):
     entry_price = 0.0000001
 
     stats["sniped"] += 1
+    ACTIVE_TRADE = True  # 🔒 lock
 
     sniped_tokens[mint] = {
         "entry": entry_price,
@@ -116,8 +126,10 @@ async def snipe(session, mint, owner):
 
     asyncio.create_task(monitor(session, mint))
 
-# 🔄 MONITOR
+# 🔄 MONITOR (UNLOCK AFTER SELL)
 async def monitor(session, mint):
+    global ACTIVE_TRADE
+
     await asyncio.sleep(5)
 
     pos = sniped_tokens[mint]
@@ -130,12 +142,14 @@ async def monitor(session, mint):
         if mult >= TAKE_PROFIT_X:
             stats["wins"] += 1
             pos["sold"] = True
+            ACTIVE_TRADE = False  # 🔓 unlock
             await send(session, f"💰 TP HIT {mint[:6]} {mult:.2f}x")
             break
 
         if mult <= (1 - STOP_LOSS_PCT):
             stats["losses"] += 1
             pos["sold"] = True
+            ACTIVE_TRADE = False  # 🔓 unlock
             await send(session, f"🛑 SL HIT {mint[:6]}")
             break
 
@@ -188,7 +202,7 @@ async def scan(session):
             log(e)
             await asyncio.sleep(5)
 
-# 📊 STATS
+# 📊 REPORT
 async def stats_loop(session):
     while True:
         await asyncio.sleep(300)
@@ -202,7 +216,7 @@ async def stats_loop(session):
 
 async def main():
     async with aiohttp.ClientSession() as session:
-        await send(session, "🚀 BOT STARTED (PRO MODE)")
+        await send(session, "🚀 BOT STARTED (PRO SINGLE TRADE MODE)")
 
         await asyncio.gather(
             scan(session),
