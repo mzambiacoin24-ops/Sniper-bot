@@ -13,11 +13,10 @@ ACTIVE_TRADE = False
 CURRENT_TOKEN = None
 ENTRY_TIME = 0
 
-BUY_DELAY = 12
 TP_TIME = 120
-SL_TIME = 45
+SL_TIME = 50
 
-seen_mints = set()
+seen_counts = {}
 
 async def send(session, msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -34,9 +33,9 @@ def extract_mints(tx):
     except:
         return []
 
-# 🚀 SMART PICK (NO SPAM)
-async def find_token(session):
-    sigs = await rpc(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":15}])
+# 🔥 SMART DETECTION (MULTI-HIT)
+async def find_strong_token(session):
+    sigs = await rpc(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":20}])
 
     for s in sigs:
         tx = await rpc(session, "getTransaction", [s["signature"], {"encoding":"json"}])
@@ -46,36 +45,34 @@ async def find_token(session):
         mints = extract_mints(tx)
 
         for mint in mints:
-            if mint not in seen_mints:
-                seen_mints.add(mint)
+            seen_counts[mint] = seen_counts.get(mint, 0) + 1
+
+            # 🚀 lazima ionekane mara 3
+            if seen_counts[mint] >= 3:
                 return mint
 
     return None
 
-# 🚀 MAIN LOGIC
+# 🚀 MAIN
 async def sniper():
     global ACTIVE_TRADE, CURRENT_TOKEN, ENTRY_TIME
 
     async with aiohttp.ClientSession() as session:
-        await send(session, "🤖 SMART SNIPER READY")
+        await send(session, "🤖 SMART SNIPER (ANTI-SL MODE)")
 
         while True:
 
-            # 🔒 kama kuna trade inaendelea → subiri
             if ACTIVE_TRADE:
                 await asyncio.sleep(2)
                 continue
 
-            mint = await find_token(session)
+            mint = await find_strong_token(session)
 
             if not mint:
                 await asyncio.sleep(2)
                 continue
 
-            # ⏳ delay (avoid fake pumps)
-            await asyncio.sleep(BUY_DELAY)
-
-            # 🚀 BUY ONE TOKEN ONLY
+            # 🚀 BUY
             ACTIVE_TRADE = True
             CURRENT_TOKEN = mint
             ENTRY_TIME = time.time()
@@ -84,7 +81,7 @@ async def sniper():
                 f"🚀 BUY\n{mint}\nhttps://pump.fun/{mint}"
             )
 
-            # 🔄 MONITOR HII TU
+            # 🔄 MONITOR
             while ACTIVE_TRADE:
                 elapsed = time.time() - ENTRY_TIME
 
@@ -94,7 +91,7 @@ async def sniper():
                     CURRENT_TOKEN = None
                     break
 
-                if elapsed >= SL_TIME and elapsed < TP_TIME:
+                if elapsed >= SL_TIME:
                     await send(session, f"🛑 SELL (SL)\n{CURRENT_TOKEN}")
                     ACTIVE_TRADE = False
                     CURRENT_TOKEN = None
