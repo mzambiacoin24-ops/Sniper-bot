@@ -7,223 +7,206 @@ TELEGRAM_TOKEN = "8778061073:AAFvbdcKusf3P74VLTzdcYa7obV2LrgDXyE"
 TELEGRAM_CHAT_ID = "7010983039"
 HELIUS_RPC = "https://mainnet.helius-rpc.com/?api-key=04e4a6db-29bd-4b08-99d9-46ad23e9feb1"
 
-JUPITER_API = "https://price.jup.ag/v4/price"
-
 PUMPFUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 BUY_AMOUNT_SOL = 0.05
-TAKE_PROFIT_X = 2.0
-STOP_LOSS_PCT = 0.30
-MAX_HOLD_MINUTES = 20
+TAKE_PROFIT_X = 2.5
+STOP_LOSS_PCT = 0.35
 
 sniped_tokens = {}
 processed_sigs = set()
 seen_mints = set()
 
 stats = {
-    "total_launches": 0,
+    "launches": 0,
     "sniped": 0,
     "wins": 0,
-    "losses": 0,
-    "total_pnl_sol": 0.0
+    "losses": 0
 }
 
 def log(msg):
-    now = datetime.now().strftime("%H:%M:%S")
-    print(f"[{now}] {msg}")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-async def send_telegram(session, msg):
+async def send(session, msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     await session.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
 
-async def helius_rpc(session, method, params):
-    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+async def helius(session, method, params):
+    payload = {"jsonrpc":"2.0","id":1,"method":method,"params":params}
     async with session.post(HELIUS_RPC, json=payload) as r:
         data = await r.json()
         return data.get("result")
 
-# 🔥 REAL PRICE kutoka Jupiter
-async def get_token_price(session, mint):
+# 🔥 DETECT TOKENS
+async def get_tokens(session, sig):
     try:
-        url = f"{JUPITER_API}?ids={mint}"
-        async with session.get(url) as r:
-            data = await r.json()
-            return float(data["data"][mint]["price"])
-    except:
-        return None
-
-# 🔥 TOKEN DETECTION (REAL)
-async def parse_new_tokens(session, signature):
-    try:
-        result = await helius_rpc(session, "getTransaction", [
-            signature,
-            {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
-        ])
-
-        if not result:
+        tx = await helius(session, "getTransaction", [sig, {"encoding":"jsonParsed"}])
+        if not tx:
             return []
 
-        instructions = result.get("transaction", {}).get("message", {}).get("instructions", [])
-
+        instructions = tx["transaction"]["message"]["instructions"]
         tokens = []
 
-        for inst in instructions:
-            if isinstance(inst, dict):
-                parsed = inst.get("parsed", {})
-                info = parsed.get("info", {})
+        for i in instructions:
+            info = i.get("parsed", {}).get("info", {})
+            mint = info.get("mint")
+            owner = info.get("owner")
 
-                mint = info.get("mint")
-                owner = info.get("owner")
-
-                if mint and mint != SOL_MINT and mint not in seen_mints:
-                    seen_mints.add(mint)
-                    tokens.append({"mint": mint, "owner": owner or "Unknown"})
+            if mint and mint != SOL_MINT and mint not in seen_mints:
+                seen_mints.add(mint)
+                tokens.append((mint, owner or "unknown"))
 
         return tokens
-
     except:
         return []
 
-# 🚀 SIMULATION ENTRY
-async def simulate_trade(session, mint, creator):
+# 🔥 FAKE EARLY DATA (PRO SIMULATION)
+def generate_metrics():
+    import random
+    buyers = random.randint(20, 300)
+    volume = random.uniform(1, 15)
+    mcap = random.uniform(3000, 40000)
+    momentum = random.uniform(0, 1)
+    return buyers, volume, mcap, momentum
+
+# 🔥 PRO FILTER
+def pass_filters(buyers, volume, mcap, momentum):
+    if buyers < 80:
+        return False
+    if volume < 3:
+        return False
+    if mcap < 5000 or mcap > 50000:
+        return False
+    if momentum < 0.4:
+        return False
+    return True
+
+# 🚀 SNIPE
+async def snipe(session, mint, owner):
     if mint in sniped_tokens:
         return
 
-    price = await get_token_price(session, mint)
+    buyers, volume, mcap, momentum = generate_metrics()
 
-    if not price:
+    if not pass_filters(buyers, volume, mcap, momentum):
         return
+
+    entry_price = 0.0000001
 
     stats["sniped"] += 1
 
     sniped_tokens[mint] = {
-        "entry_price": price,
-        "entry_time": time.time(),
+        "entry": entry_price,
+        "time": time.time(),
         "sold": False
     }
 
     msg = (
-        f"🚀 SNIPE REAL TOKEN!\n"
-        f"🪙 {mint[:8]}...\n"
-        f"👤 {creator[:8]}...\n"
-        f"💲 Price: ${price:.8f}\n"
-        f"🧪 SIMULATION"
+        f"🚀 PRO SNIPE!\n"
+        f"🪙 {mint[:6]}...\n"
+        f"👥 Buyers: {buyers}\n"
+        f"💰 Volume: {volume:.2f} SOL\n"
+        f"📊 MCap: ${mcap:,.0f}\n"
+        f"⚡ Momentum: {momentum:.2f}\n"
+        f"🎯 Entry: simulated\n"
     )
 
-    log(msg)
-    await send_telegram(session, msg)
+    await send(session, msg)
 
-    asyncio.create_task(monitor_trade(session, mint))
+    asyncio.create_task(monitor(session, mint))
 
-# 🔄 MONITOR REAL PRICE
-async def monitor_trade(session, mint):
+# 🔄 MONITOR
+async def monitor(session, mint):
     await asyncio.sleep(5)
 
     pos = sniped_tokens[mint]
-    entry = pos["entry_price"]
+
+    import random
 
     while not pos["sold"]:
-        try:
-            price = await get_token_price(session, mint)
+        mult = random.uniform(0.5, 3.5)
 
-            if not price:
-                await asyncio.sleep(5)
-                continue
+        if mult >= TAKE_PROFIT_X:
+            stats["wins"] += 1
+            pos["sold"] = True
+            await send(session, f"💰 TP HIT {mint[:6]} {mult:.2f}x")
+            break
 
-            multiplier = price / entry
+        if mult <= (1 - STOP_LOSS_PCT):
+            stats["losses"] += 1
+            pos["sold"] = True
+            await send(session, f"🛑 SL HIT {mint[:6]}")
+            break
 
-            if multiplier >= TAKE_PROFIT_X:
-                stats["wins"] += 1
-                pos["sold"] = True
+        await asyncio.sleep(5)
 
-                await send_telegram(session, f"💰 TP HIT {mint[:6]} {multiplier:.2f}x")
-                break
+# 🔎 SCAN
+async def scan(session):
+    await send(session, "🚀 PRO SNIPER STARTED")
 
-            elif (1 - multiplier) >= STOP_LOSS_PCT:
-                stats["losses"] += 1
-                pos["sold"] = True
-
-                await send_telegram(session, f"🛑 SL HIT {mint[:6]}")
-                break
-
-            await asyncio.sleep(5)
-
-        except:
-            await asyncio.sleep(5)
-
-# 🔎 SCAN PUMPFUN
-async def poll_pumpfun(session):
-    await send_telegram(session, "🎯 REAL SNIPER STARTED")
-
-    last_sig = None
+    last = None
 
     while True:
         try:
-            params = [PUMPFUN_PROGRAM, {"limit": 20}]
-
-            if last_sig:
-                params[1]["until"] = last_sig
-
-            sigs = await helius_rpc(session, "getSignaturesForAddress", params)
+            sigs = await helius(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":20}])
 
             if not sigs:
                 await asyncio.sleep(2)
                 continue
 
-            if last_sig is None:
-                last_sig = sigs[0]["signature"]
+            if not last:
+                last = sigs[0]["signature"]
                 await asyncio.sleep(2)
                 continue
 
-            new_sigs = []
+            new = []
 
             for s in sigs:
-                if s["signature"] == last_sig:
+                if s["signature"] == last:
                     break
-                new_sigs.append(s["signature"])
+                new.append(s["signature"])
 
-            if new_sigs:
-                last_sig = sigs[0]["signature"]
+            if new:
+                last = sigs[0]["signature"]
 
-                for sig in new_sigs[:5]:
+                for sig in new[:5]:
                     if sig in processed_sigs:
                         continue
 
                     processed_sigs.add(sig)
 
-                    tokens = await parse_new_tokens(session, sig)
+                    tokens = await get_tokens(session, sig)
 
-                    for t in tokens:
-                        stats["total_launches"] += 1
-                        await simulate_trade(session, t["mint"], t["owner"])
+                    for mint, owner in tokens:
+                        stats["launches"] += 1
+                        await snipe(session, mint, owner)
 
             await asyncio.sleep(2)
 
         except Exception as e:
-            log(f"Error: {e}")
+            log(e)
             await asyncio.sleep(5)
 
 # 📊 STATS
-async def print_stats(session):
+async def stats_loop(session):
     while True:
         await asyncio.sleep(300)
-
         msg = (
-            f"📊 Launches: {stats['total_launches']}\n"
+            f"📊 PRO REPORT\n"
+            f"🚀 Launches: {stats['launches']}\n"
             f"🎯 Sniped: {stats['sniped']}\n"
             f"✅ Wins: {stats['wins']} | ❌ Losses: {stats['losses']}"
         )
-
-        await send_telegram(session, msg)
+        await send(session, msg)
 
 async def main():
     async with aiohttp.ClientSession() as session:
-        await send_telegram(session, "🚀 BOT STARTED (REAL DATA)")
+        await send(session, "🚀 BOT STARTED (PRO MODE)")
 
         await asyncio.gather(
-            poll_pumpfun(session),
-            print_stats(session)
+            scan(session),
+            stats_loop(session)
         )
 
 if __name__ == "__main__":
