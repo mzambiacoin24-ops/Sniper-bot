@@ -7,24 +7,24 @@ from solana.rpc.async_api import AsyncClient
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
-# ENV
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 HELIUS_RPC = os.getenv("HELIUS_RPC")
 
-# WALLET
 def load_wallet():
     return Keypair.from_bytes(base58.b58decode(PRIVATE_KEY))
 
-# REAL BUY FUNCTION
 async def real_buy(mint):
     try:
+        print("START BUY...")
+
         wallet = load_wallet()
         client = AsyncClient(HELIUS_RPC)
         owner = wallet.pubkey()
 
-        # 💰 balance
         balance = await client.get_balance(owner)
         amount = int(balance.value * 0.5)
+
+        print("BALANCE:", balance.value)
 
         if amount < 10000:
             print("Balance ndogo sana")
@@ -32,7 +32,8 @@ async def real_buy(mint):
 
         async with aiohttp.ClientSession() as session:
 
-            # 🔁 STEP 1: GET QUOTE
+            print("GET QUOTE...")
+
             quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint={mint}&amount={amount}&slippageBps=1500"
 
             async with session.get(quote_url) as r:
@@ -44,7 +45,8 @@ async def real_buy(mint):
 
             route = quote["data"][0]
 
-            # 🔁 STEP 2: GET SWAP TX
+            print("GET SWAP TX...")
+
             swap_url = "https://quote-api.jup.ag/v6/swap"
             payload = {
                 "route": route,
@@ -60,14 +62,17 @@ async def real_buy(mint):
                 print("No tx")
                 return False
 
-            # 🔐 STEP 3: SIGN TX
+            print("SIGNING TX...")
+
             tx_bytes = base64.b64decode(tx_base64)
             tx = VersionedTransaction.from_bytes(tx_bytes)
 
-            tx.sign([wallet])
+            # 🔥 SIGN FIX
+            tx = VersionedTransaction(tx.message, [wallet])
 
-            # 🚀 STEP 4: SEND TX
-            result = await client.send_raw_transaction(tx.serialize())
+            print("SENDING TX...")
+
+            result = await client.send_raw_transaction(bytes(tx))
 
             print("TX SENT:", result)
 
@@ -84,18 +89,13 @@ async def main():
 
     mint = "EPjFWdd5AufqSSqeM2q4G9o2wJxzyy7f3Xv7h8aX7Zr"
 
-    result = await real_buy(mint)
-
-    print("RESULT:", result)
-
-    
-
     success = await real_buy(mint)
 
     if success:
         print("BUY SUCCESS")
     else:
         print("BUY FAILED")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
