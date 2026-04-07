@@ -1,12 +1,12 @@
 import asyncio
 import aiohttp
 import time
+import random
 from datetime import datetime
 
 TELEGRAM_TOKEN = "8778061073:AAFvbdcKusf3P74VLTzdcYa7obV2LrgDXyE"
 TELEGRAM_CHAT_ID = "7010983039"
 HELIUS_RPC = "https://mainnet.helius-rpc.com/?api-key=04e4a6db-29bd-4b08-99d9-46ad23e9feb1"
-HELIUS_KEY = "04e4a6db-29bd-4b08-99d9-46ad23e9feb1"
 JUPITER_API = "https://quote-api.jup.ag/v6"
 
 PUMPFUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
@@ -15,19 +15,25 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 DRY_RUN = True
 
 BUY_AMOUNT_SOL = 0.05
-MAX_PRICE_IMPACT_PCT = 25
 TAKE_PROFIT_X = 3.0
 STOP_LOSS_PCT = 0.30
-MAX_HOLD_MINUTES = 30
+MAX_HOLD_MINUTES = 20
+
+TOTAL_SUPPLY = 1_000_000_000
+GRADUATION_MCAP = 69_000
+INITIAL_PRICE = 0.000001
 
 sniped_tokens = {}
 processed_sigs = set()
+seen_mints = set()
+
 stats = {
     "total_launches": 0,
     "sniped": 0,
     "wins": 0,
     "losses": 0,
-    "total_pnl": 0.0
+    "total_pnl_sol": 0.0,
+    "graduated": 0
 }
 
 def log(msg):
@@ -59,254 +65,297 @@ async def get_sol_price(session):
     except:
         return 85.0
 
-async def get_token_price(session, token_mint):
-    try:
-        url = f"https://price.jup.ag/v4/price?ids={token_mint}"
-        async with session.get(url) as r:
-            data = await r.json()
-            return float(data.get("data", {}).get(token_mint, {}).get("price", 0))
-    except:
-        return 0.0
+class BondingCurve:
+    def __init__(self, token_mint, sol_price):
+        self.token_mint = token_mint
+        self.sol_price = sol_price
+        self.current_price_usd = INITIAL_PRICE
+        self.market_cap_usd = INITIAL_PRICE * TOTAL_SUPPLY
+        self.graduated = False
+        self.buyers = 0
+        self.last_update = time.time()
 
-async def is_honeypot(session, token_mint):
-    try:
-        url = (
-            f"{JUPITER_API}/quote?"
-            f"inputMint={token_mint}"
-            f"&outputMint={SOL_MINT}"
-            f"&amount=1000000"
-            f"&slippageBps=2500"
-        )
-        async with session.get(url) as r:
-            if r.status != 200:
-                return True
-            data = await r.json()
-            impact = float(data.get("priceImpactPct", 100))
-            return impact > MAX_PRICE_IMPACT_PCT
-    except:
-        return True
+    def simulate_market_activity(self):
+        elapsed = time.time() - self.last_update
+        self.last_update = time.time()
 
-async def get_new_pumpfun_tokens(session, last_sig):
-    try:
-        params = [
-            PUMPFUN_PROGRAM,
-            {"limit": 20, "commitment": "confirmed"}
-        ]
-        if last_sig:
-            params[1]["until"] = last_sig
+        activity = random.random()
 
-        result = await helius_rpc(session, "getSignaturesForAddress", params)
-        return result if result else []
-    except:
-        return []
+        if self.market_cap_usd < 1000:
+            if activity < 0.7:
+                change = random.uniform(0.02, 0.15)
+                self.buyers += random.randint(1, 5)
+            else:
+                change = random.uniform(-0.05, -0.01)
+        elif self.market_cap_usd < 10000:
+            if activity < 0.6:
+                change = random.uniform(0.01, 0.08)
+                self.buyers += random.randint(1, 3)
+            else:
+                change = random.uniform(-0.08, -0.02)
+        elif self.market_cap_usd < 40000:
+            if activity < 0.5:
+                change = random.uniform(0.005, 0.05)
+            else:
+                change = random.uniform(-0.10, -0.01)
+        else:
+            if activity < 0.45:
+                change = random.uniform(0.003, 0.03)
+            else:
+                change = random.uniform(-0.15, -0.01)
 
-async def parse_token_from_tx(session, signature):
-    try:
-        result = await helius_rpc(session, "getTransaction", [
-            signature,
-            {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
-        ])
-        if not result:
-            return None, None
+        self.current_price_usd *= (1 + change)
+        self.market_cap_usd = self.current_price_usd * TOTAL_SUPPLY
 
-        meta = result.get("meta", {})
-        if meta.get("err"):
-            return None, None
+        if self.market_cap_usd >= GRADUATION_MCAP:
+            self.graduated = True
 
-        log_messages = meta.get("logMessages", [])
+        return self.current_price_usd
 
-        is_new = any(
-            "create" in m.lower() or
-            "initialize" in m.lower() or
-            "mint" in m.lower()
-            for m in log_messages
-        )
+    def get_status(self):
+        progress = min((self.market_cap_usd / GRADUATION_MCAP) * 100, 100)
+        return {
+            "price_usd": self.current_price_usd,
+            "mcap_usd": self.market_cap_usd,
+            "progress": progress,
+            "buyers": self.buyers,
+            "graduated": self.graduated
+        }
 
-        if not is_new:
-            return None, None
-
-        accounts = result.get("transaction", {}).get("message", {}).get("accountKeys", [])
-        creator = None
-        for acc in accounts:
-            if isinstance(acc, dict) and acc.get("signer"):
-                creator = acc.get("pubkey")
-                break
-
-        post_balances = meta.get("postTokenBalances", [])
-        pre_balances = meta.get("preTokenBalances", [])
-        pre_mints = {b["mint"] for b in pre_balances}
-
-        new_mints = [
-            b["mint"] for b in post_balances
-            if b["mint"] not in pre_mints
-        ]
-
-        if new_mints:
-            return new_mints[0], creator
-
-        if post_balances:
-            return post_balances[0]["mint"], creator
-
-        return None, None
-
-    except:
-        return None, None
-
-async def snipe_token(session, token_mint, creator):
+async def simulate_bonding_curve_trade(session, token_mint, creator):
     if token_mint in sniped_tokens:
         return
 
-    honeypot = await is_honeypot(session, token_mint)
-    if honeypot:
-        log(f"Honeypot imezuiwa: {token_mint[:8]}...")
-        return
-
     sol_price = await get_sol_price(session)
-    entry_price = await get_token_price(session, token_mint)
-    usd_value = BUY_AMOUNT_SOL * sol_price
+    curve = BondingCurve(token_mint, sol_price)
+
+    curve.simulate_market_activity()
+    curve.simulate_market_activity()
+    curve.simulate_market_activity()
+
+    entry_price_usd = curve.current_price_usd
+    tokens_bought = (BUY_AMOUNT_SOL * sol_price) / entry_price_usd
+    entry_mcap = curve.market_cap_usd
+
     stats["sniped"] += 1
 
     sniped_tokens[token_mint] = {
-        "entry_price": entry_price,
+        "curve": curve,
+        "entry_price_usd": entry_price_usd,
+        "tokens_bought": tokens_bought,
         "entry_time": time.time(),
+        "entry_mcap": entry_mcap,
         "creator": creator or "Unknown",
         "buy_sol": BUY_AMOUNT_SOL,
         "sold": False
     }
 
     msg = (
-        f"🚀 EARLY SNIPE!\n"
+        f"🚀 BONDING CURVE SNIPE!\n"
         f"🪙 Token: {token_mint[:8]}...\n"
         f"👤 Creator: {(creator or 'Unknown')[:8]}...\n"
-        f"💰 Kununua: {BUY_AMOUNT_SOL} SOL (${usd_value:.1f})\n"
-        f"💲 Bei entry: ${entry_price:.10f}\n"
+        f"💰 Kununua: {BUY_AMOUNT_SOL} SOL (${BUY_AMOUNT_SOL*sol_price:.2f})\n"
+        f"💲 Bei entry: ${entry_price_usd:.8f}\n"
+        f"🪙 Tokens: {tokens_bought:,.0f}\n"
+        f"📊 Market Cap: ${entry_mcap:,.0f}\n"
+        f"📈 Progress: {(entry_mcap/GRADUATION_MCAP)*100:.1f}% → $69k\n"
         f"🎯 TP: {TAKE_PROFIT_X}x | SL: -{STOP_LOSS_PCT*100:.0f}%\n"
-        f"🧪 SIMULATION"
+        f"🧪 BONDING CURVE SIMULATION"
     )
     log(msg)
     await send_telegram(session, msg)
-    asyncio.create_task(monitor_position(session, token_mint))
 
-async def monitor_position(session, token_mint):
-    await asyncio.sleep(15)
+    asyncio.create_task(monitor_bonding_curve(session, token_mint))
+
+async def monitor_bonding_curve(session, token_mint):
+    await asyncio.sleep(5)
 
     if token_mint not in sniped_tokens:
         return
 
     position = sniped_tokens[token_mint]
-    entry_price = position["entry_price"]
+    curve = position["curve"]
+    entry_price = position["entry_price_usd"]
+    tokens = position["tokens_bought"]
+    sol_price = await get_sol_price(session)
 
-    if entry_price <= 0:
-        position["sold"] = True
-        return
+    update_count = 0
 
     while not position["sold"]:
         try:
-            current_price = await get_token_price(session, token_mint)
+            current_price = curve.simulate_market_activity()
+            status = curve.get_status()
             elapsed_min = (time.time() - position["entry_time"]) / 60
-
-            if current_price <= 0:
-                await asyncio.sleep(15)
-                continue
-
             multiplier = current_price / entry_price
             change_pct = (multiplier - 1) * 100
+            current_value_usd = tokens * current_price
+            entry_value_usd = tokens * entry_price
+            pnl_usd = current_value_usd - entry_value_usd
+            pnl_sol = pnl_usd / sol_price
+            update_count += 1
 
-            if multiplier >= TAKE_PROFIT_X:
-                pnl = position["buy_sol"] * (multiplier - 1)
+            if update_count % 10 == 0:
+                log(
+                    f"📊 {token_mint[:8]}... | "
+                    f"{multiplier:.2f}x | "
+                    f"MCap: ${status['mcap_usd']:,.0f} | "
+                    f"Progress: {status['progress']:.1f}%"
+                )
+
+            if status["graduated"]:
+                final_pnl_sol = pnl_sol
                 stats["wins"] += 1
-                stats["total_pnl"] += pnl
+                stats["total_pnl_sol"] += final_pnl_sol
+                stats["graduated"] += 1
                 position["sold"] = True
-                sol_price = await get_sol_price(session)
+                msg = (
+                    f"🎓 GRADUATED TO RAYDIUM!\n"
+                    f"🪙 Token: {token_mint[:8]}...\n"
+                    f"📈 Bei: {multiplier:.1f}x (+{change_pct:.0f}%)\n"
+                    f"📊 Final MCap: ${status['mcap_usd']:,.0f}\n"
+                    f"💰 PnL: +{final_pnl_sol:.4f} SOL (${final_pnl_sol*sol_price:.2f})\n"
+                    f"📊 Total PnL: {stats['total_pnl_sol']:.4f} SOL\n"
+                    f"🎉 Token imefanikiwa!\n"
+                    f"🧪 SIMULATION"
+                )
+                await send_telegram(session, msg)
+                break
+
+            elif multiplier >= TAKE_PROFIT_X:
+                stats["wins"] += 1
+                stats["total_pnl_sol"] += pnl_sol
+                position["sold"] = True
                 msg = (
                     f"💰 TAKE PROFIT!\n"
-                    f"🪙 {token_mint[:8]}...\n"
+                    f"🪙 Token: {token_mint[:8]}...\n"
                     f"📈 {multiplier:.1f}x (+{change_pct:.0f}%)\n"
-                    f"💵 PnL: +{pnl:.4f} SOL (${pnl*sol_price:.1f})\n"
-                    f"📊 Total PnL: {stats['total_pnl']:.4f} SOL\n"
+                    f"📊 MCap: ${status['mcap_usd']:,.0f}\n"
+                    f"💵 PnL: +{pnl_sol:.4f} SOL (${pnl_sol*sol_price:.2f})\n"
+                    f"📊 Total PnL: {stats['total_pnl_sol']:.4f} SOL\n"
                     f"🧪 SIMULATION"
                 )
                 await send_telegram(session, msg)
                 break
 
             elif (1 - multiplier) >= STOP_LOSS_PCT:
-                pnl = -position["buy_sol"] * STOP_LOSS_PCT
+                loss_sol = position["buy_sol"] * STOP_LOSS_PCT
                 stats["losses"] += 1
-                stats["total_pnl"] += pnl
+                stats["total_pnl_sol"] -= loss_sol
                 position["sold"] = True
                 msg = (
                     f"🛑 STOP LOSS!\n"
-                    f"🪙 {token_mint[:8]}...\n"
-                    f"📉 {change_pct:.0f}%\n"
-                    f"💸 PnL: {pnl:.4f} SOL\n"
-                    f"📊 Total PnL: {stats['total_pnl']:.4f} SOL\n"
+                    f"🪙 Token: {token_mint[:8]}...\n"
+                    f"📉 {multiplier:.2f}x ({change_pct:.0f}%)\n"
+                    f"📊 MCap: ${status['mcap_usd']:,.0f}\n"
+                    f"💸 PnL: -{loss_sol:.4f} SOL\n"
+                    f"📊 Total PnL: {stats['total_pnl_sol']:.4f} SOL\n"
                     f"🧪 SIMULATION"
                 )
                 await send_telegram(session, msg)
                 break
 
             elif elapsed_min >= MAX_HOLD_MINUTES:
-                pnl = position["buy_sol"] * (multiplier - 1)
-                if pnl > 0:
+                if pnl_sol > 0:
                     stats["wins"] += 1
                 else:
                     stats["losses"] += 1
-                stats["total_pnl"] += pnl
+                stats["total_pnl_sol"] += pnl_sol
                 position["sold"] = True
-                sol_price = await get_sol_price(session)
                 msg = (
-                    f"⏱️ MUDA UMEISHA!\n"
-                    f"🪙 {token_mint[:8]}...\n"
+                    f"⏱️ MUDA UMEISHA — INAOUZA!\n"
+                    f"🪙 Token: {token_mint[:8]}...\n"
                     f"📊 {multiplier:.2f}x ({change_pct:+.1f}%)\n"
-                    f"💵 PnL: {pnl:+.4f} SOL (${pnl*sol_price:.1f})\n"
-                    f"📊 Total PnL: {stats['total_pnl']:.4f} SOL\n"
+                    f"📊 MCap: ${status['mcap_usd']:,.0f}\n"
+                    f"💵 PnL: {pnl_sol:+.4f} SOL (${pnl_sol*sol_price:.2f})\n"
+                    f"📊 Total PnL: {stats['total_pnl_sol']:.4f} SOL\n"
                     f"🧪 SIMULATION"
                 )
                 await send_telegram(session, msg)
                 break
 
-            await asyncio.sleep(15)
+            await asyncio.sleep(8)
 
         except Exception as e:
             log(f"Monitor error: {e}")
-            await asyncio.sleep(15)
+            await asyncio.sleep(10)
+
+async def parse_new_tokens(session, signature):
+    try:
+        result = await helius_rpc(session, "getTransaction", [
+            signature,
+            {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
+        ])
+        if not result:
+            return []
+
+        meta = result.get("meta", {})
+        if meta.get("err"):
+            return []
+
+        pre_balances = meta.get("preTokenBalances", [])
+        post_balances = meta.get("postTokenBalances", [])
+        pre_mints = {b["mint"] for b in pre_balances}
+
+        new_tokens = []
+        for b in post_balances:
+            mint = b.get("mint", "")
+            if mint and mint not in pre_mints and mint != SOL_MINT and mint not in seen_mints:
+                owner = b.get("owner", "")
+                new_tokens.append({"mint": mint, "owner": owner})
+                seen_mints.add(mint)
+
+        return new_tokens
+
+    except:
+        return []
 
 async def poll_pumpfun(session):
     log("Inaanza polling Pump.fun...")
-    await send_telegram(session, "🔍 Bot inaangalia Pump.fun kwa polling...")
+    await send_telegram(session, "🎯 Pump.fun Bonding Curve Sniper inaanza...")
 
     last_sig = None
 
     while True:
         try:
-            sigs = await get_new_pumpfun_tokens(session, last_sig)
+            params = [PUMPFUN_PROGRAM, {"limit": 10, "commitment": "confirmed"}]
+            if last_sig:
+                params[1]["until"] = last_sig
 
-            if sigs:
-                if last_sig is None:
-                    last_sig = sigs[0]["signature"]
-                    log(f"Initialized. Inaanza kufuatilia...")
-                    await asyncio.sleep(3)
-                    continue
+            sigs = await helius_rpc(session, "getSignaturesForAddress", params)
 
-                new_sigs = []
-                for s in sigs:
-                    if s["signature"] == last_sig:
-                        break
+            if not sigs:
+                await asyncio.sleep(2)
+                continue
+
+            if last_sig is None:
+                last_sig = sigs[0]["signature"]
+                log("Imeanzishwa. Inasubiri tokens mpya...")
+                await asyncio.sleep(2)
+                continue
+
+            new_sigs = []
+            for s in sigs:
+                if s["signature"] == last_sig:
+                    break
+                if not s.get("err"):
                     new_sigs.append(s["signature"])
 
-                if new_sigs:
-                    last_sig = sigs[0]["signature"]
-                    log(f"Transactions mpya {len(new_sigs)} zimepatikana!")
+            if new_sigs:
+                last_sig = sigs[0]["signature"]
 
-                    for sig in new_sigs[:5]:
-                        if sig not in processed_sigs:
-                            processed_sigs.add(sig)
-                            token_mint, creator = await parse_token_from_tx(session, sig)
+                for sig in new_sigs[:3]:
+                    if sig in processed_sigs:
+                        continue
+                    processed_sigs.add(sig)
 
-                            if token_mint:
-                                stats["total_launches"] += 1
-                                log(f"Token mpya: {token_mint[:8]}...")
-                                await snipe_token(session, token_mint, creator)
+                    new_tokens = await parse_new_tokens(session, sig)
+
+                    for token_info in new_tokens:
+                        mint = token_info["mint"]
+                        creator = token_info["owner"]
+                        stats["total_launches"] += 1
+                        log(f"🆕 Token mpya #{stats['total_launches']}: {mint[:8]}...")
+                        await simulate_bonding_curve_trade(session, mint, creator)
 
             await asyncio.sleep(2)
 
@@ -324,9 +373,11 @@ async def print_stats(session):
             f"🚀 Launches: {stats['total_launches']}\n"
             f"🎯 Sniped: {stats['sniped']}\n"
             f"✅ Wins: {stats['wins']} | ❌ Losses: {stats['losses']}\n"
+            f"🎓 Graduated: {stats['graduated']}\n"
             f"📈 Win Rate: {win_rate:.1f}%\n"
-            f"💰 Total PnL: {stats['total_pnl']:.4f} SOL (${stats['total_pnl']*sol_price:.1f})\n"
-            f"🧪 SIMULATION"
+            f"💰 Total PnL: {stats['total_pnl_sol']:.4f} SOL\n"
+            f"💵 USD: ${stats['total_pnl_sol']*sol_price:.2f}\n"
+            f"🧪 BONDING CURVE SIMULATION"
         )
         log(msg)
         await send_telegram(session, msg)
@@ -335,13 +386,14 @@ async def main():
     async with aiohttp.ClientSession() as session:
         sol_price = await get_sol_price(session)
         start_msg = (
-            f"🎯 PUMP.FUN EARLY SNIPER V2!\n"
-            f"🔄 Method: Polling (hakuna WebSocket)\n"
-            f"💰 Buy: {BUY_AMOUNT_SOL} SOL (${BUY_AMOUNT_SOL*sol_price:.1f})\n"
+            f"🎯 PUMP.FUN BONDING CURVE SNIPER!\n"
+            f"📈 Bonding Curve Simulation: ACTIVE\n"
+            f"💰 Buy: {BUY_AMOUNT_SOL} SOL (${BUY_AMOUNT_SOL*sol_price:.2f})\n"
             f"🎯 Take Profit: {TAKE_PROFIT_X}x\n"
             f"🛑 Stop Loss: -{STOP_LOSS_PCT*100:.0f}%\n"
+            f"🎓 Graduation Target: ${GRADUATION_MCAP:,}\n"
             f"⏱️ Max Hold: {MAX_HOLD_MINUTES} dakika\n"
-            f"🧪 Mode: {'SIMULATION' if DRY_RUN else 'LIVE'}"
+            f"🧪 Mode: BONDING CURVE SIMULATION"
         )
         log(start_msg)
         await send_telegram(session, start_msg)
