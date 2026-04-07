@@ -78,10 +78,17 @@ async def real_buy(mint):
         print("ERROR:", e)
         return False
 
-# TEST RUN
+
 async def main():
-    # mfano token (utabadilisha na pumpfun detection)
-    mint = "EPjFWdd5AufqSSqeM2q4G9o2wJxzyy7f3Xv7h8aX7Zr"  # USDC
+    print("BOT STARTED...")
+
+    mint = "EPjFWdd5AufqSSqeM2q4G9o2wJxzyy7f3Xv7h8aX7Zr"
+
+    result = await real_buy(mint)
+
+    print("RESULT:", result)
+
+    
 
     success = await real_buy(mint)
 
