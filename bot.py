@@ -106,7 +106,7 @@ async def real_buy(mint):
 async def main():
     print("BOT STARTED...")
 
-    mint = "EPjFWdd5AufqSSqeM2q4G9o2wJxzyy7f3Xv7h8aX7Zr"
+    mint = "So11111111111111111111111111111111111111112"
 
     success = await real_buy(mint)
 
