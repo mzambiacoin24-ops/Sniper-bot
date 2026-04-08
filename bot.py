@@ -4,156 +4,125 @@ import os
 import base64
 import struct
 import time
-from hashlib import sha256
 
-# ===== ENV =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 HELIUS_RPC = os.getenv("HELIUS_RPC")
 
 PUMPFUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 
-# ===== CONFIG =====
-TP_PCT = 1.5      # 150% (≈ 2.5x)
-SL_PCT = 0.35     # -35%
-
 ACTIVE = False
 CURRENT = None
 USED = set()
-ENTRY_PRICE = 0
-PEAK_PRICE = 0
 
-# ===== TELEGRAM =====
+ENTRY_PRICE = 0
+PEAK = 0
+
+TP = 1.5
+SL = 0.35
+
 async def send(session, msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     await session.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
 
-# ===== RPC =====
 async def rpc(session, method, params):
     payload = {"jsonrpc":"2.0","id":1,"method":method,"params":params}
     async with session.post(HELIUS_RPC, json=payload) as r:
         return (await r.json()).get("result")
 
-# ===== GET ACCOUNT =====
+def extract(tx):
+    try:
+        instructions = tx["transaction"]["message"]["accountKeys"]
+        balances = tx["meta"]["postTokenBalances"]
+
+        mint = balances[0]["mint"]
+        bonding = instructions[3]  # 👈 muhimu
+
+        return mint, bonding
+    except:
+        return None, None
+
+def price(data):
+    try:
+        sol = struct.unpack_from("<Q", data, 8)[0]
+        token = struct.unpack_from("<Q", data, 16)[0]
+        if token == 0:
+            return 0
+        return sol / token
+    except:
+        return 0
+
 async def get_account(session, acc):
     res = await rpc(session, "getAccountInfo", [acc, {"encoding":"base64"}])
     if not res or not res.get("value"):
         return None
     return base64.b64decode(res["value"]["data"][0])
 
-# ===== CALC PRICE (REAL) =====
-def calc_price(data):
-    try:
-        # pump.fun bonding layout (common pattern)
-        sol_reserve = struct.unpack_from("<Q", data, 8)[0]
-        token_reserve = struct.unpack_from("<Q", data, 16)[0]
-        if token_reserve == 0:
-            return 0
-        return sol_reserve / token_reserve
-    except:
-        return 0
-
-# ===== DERIVE BONDING PDA (IMPORTANT) =====
-def derive_bonding(mint):
-    # seeds zinazotumika mara nyingi kwa pump.fun
-    seeds = [
-        b"bonding-curve",
-        bytes.fromhex(mint) if len(mint)==64 else mint.encode()
-    ]
-    h = sha256(b"".join(seeds) + bytes(PUMPFUN_PROGRAM, "utf-8")).hexdigest()
-    return h[:44]  # approximate pubkey (string form)
-
-# ===== EXTRACT MINT =====
-def extract_mints(tx):
-    try:
-        return [t["mint"] for t in tx["meta"]["postTokenBalances"]]
-    except:
-        return []
-
-# ===== FIND TOKEN =====
-async def find_token(session):
-    sigs = await rpc(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":20}])
-
-    for s in sigs:
-        tx = await rpc(session, "getTransaction", [s["signature"], {"encoding":"json"}])
-        if not tx:
-            continue
-
-        for mint in extract_mints(tx):
-            if mint not in USED:
-                return mint
-    return None
-
-# ===== MAIN =====
 async def sniper():
-    global ACTIVE, CURRENT, ENTRY_PRICE, PEAK_PRICE
+    global ACTIVE, CURRENT, ENTRY_PRICE, PEAK
 
     async with aiohttp.ClientSession() as session:
-        await send(session, "🔥 REAL BONDING SNIPER (PRICE BASED)")
+        await send(session, "🔥 REAL SNIPER FIXED")
 
         while True:
 
             if ACTIVE:
-                # ===== MONITOR =====
-                bonding = derive_bonding(CURRENT)
-                data = await get_account(session, bonding)
-
+                data = await get_account(session, CURRENT["bonding"])
                 if data:
-                    price = calc_price(data)
+                    p = price(data)
 
-                    if price > PEAK_PRICE:
-                        PEAK_PRICE = price
+                    if p > PEAK:
+                        PEAK = p
 
-                    profit = (price - ENTRY_PRICE) / ENTRY_PRICE
+                    profit = (p - ENTRY_PRICE) / ENTRY_PRICE
 
-                    # 💰 TP (dynamic)
-                    if PEAK_PRICE >= ENTRY_PRICE * (1 + TP_PCT):
-                        drop = (PEAK_PRICE - price) / PEAK_PRICE
-                        if drop >= 0.25:
-                            await send(session,
-                                f"💰 SELL\n{CURRENT}\nProfit: {profit*100:.1f}%"
-                            )
-                            USED.add(CURRENT)
+                    if PEAK >= ENTRY_PRICE * (1 + TP):
+                        drop = (PEAK - p) / PEAK
+                        if drop > 0.25:
+                            await send(session, f"💰 SELL {CURRENT['mint']} {profit*100:.1f}%")
+                            USED.add(CURRENT["mint"])
                             ACTIVE = False
 
-                    # 🛑 SL
-                    elif price <= ENTRY_PRICE * (1 - SL_PCT):
-                        await send(session,
-                            f"🛑 SELL\n{CURRENT}\nLoss: {profit*100:.1f}%"
-                        )
-                        USED.add(CURRENT)
+                    elif p <= ENTRY_PRICE * (1 - SL):
+                        await send(session, f"🛑 SELL {CURRENT['mint']} {profit*100:.1f}%")
+                        USED.add(CURRENT["mint"])
                         ACTIVE = False
 
                 await asyncio.sleep(3)
                 continue
 
-            # ===== FIND NEW =====
-            mint = await find_token(session)
+            sigs = await rpc(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":15}])
 
-            if not mint:
-                await asyncio.sleep(2)
-                continue
+            for s in sigs:
+                tx = await rpc(session, "getTransaction", [s["signature"], {"encoding":"json"}])
+                if not tx:
+                    continue
 
-            bonding = derive_bonding(mint)
-            data = await get_account(session, bonding)
+                mint, bonding = extract(tx)
 
-            if not data:
-                await asyncio.sleep(2)
-                continue
+                if not mint or mint in USED:
+                    continue
 
-            price = calc_price(data)
-            if price == 0:
-                continue
+                data = await get_account(session, bonding)
+                if not data:
+                    continue
 
-            # ===== BUY =====
-            CURRENT = mint
-            ENTRY_PRICE = price
-            PEAK_PRICE = price
-            ACTIVE = True
+                p = price(data)
+                if p == 0:
+                    continue
 
-            await send(session,
-                f"🚀 BUY\n{mint}\nPrice: {price:.8f}\nhttps://pump.fun/{mint}"
-            )
+                CURRENT = {"mint": mint, "bonding": bonding}
+                ENTRY_PRICE = p
+                PEAK = p
+                ACTIVE = True
+
+                await send(session,
+                    f"🚀 BUY\n{mint}\nPrice: {p:.8f}\nhttps://pump.fun/{mint}"
+                )
+
+                break
+
+            await asyncio.sleep(2)
 
 if __name__ == "__main__":
     asyncio.run(sniper())
