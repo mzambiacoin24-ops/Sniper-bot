@@ -17,6 +17,7 @@ TP_TIME = 120
 SL_TIME = 60
 
 seen_counts = {}
+used_tokens = set()   # 🔥 muhimu sana
 
 async def send(session, msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -33,10 +34,8 @@ def extract_mints(tx):
     except:
         return []
 
-# 🔥 STRONG TOKEN (WITH MOMENTUM CHECK)
-async def find_strong_token(session):
-    global seen_counts
-
+# 🔍 FIND STRONG TOKEN (NO REPEAT)
+async def find_token(session):
     sigs = await rpc(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":20}])
 
     for s in sigs:
@@ -47,30 +46,32 @@ async def find_strong_token(session):
         mints = extract_mints(tx)
 
         for mint in mints:
+
+            # 🚫 skip zilizotumika
+            if mint in used_tokens:
+                continue
+
             seen_counts[mint] = seen_counts.get(mint, 0) + 1
 
-            # lazima ionekane mara 3
             if seen_counts[mint] >= 3:
 
-                # ⏳ SUBIRI kidogo (momentum test)
-                await asyncio.sleep(6)
+                # confirm bado hai
+                await asyncio.sleep(5)
 
                 sigs2 = await rpc(session, "getSignaturesForAddress", [PUMPFUN_PROGRAM, {"limit":10}])
 
-                still_alive = False
+                alive = False
 
                 for s2 in sigs2:
                     tx2 = await rpc(session, "getTransaction", [s2["signature"], {"encoding":"json"}])
                     if not tx2:
                         continue
 
-                    mints2 = extract_mints(tx2)
-
-                    if mint in mints2:
-                        still_alive = True
+                    if mint in extract_mints(tx2):
+                        alive = True
                         break
 
-                if still_alive:
+                if alive:
                     return mint
 
     return None
@@ -80,7 +81,7 @@ async def sniper():
     global ACTIVE_TRADE, CURRENT_TOKEN, ENTRY_TIME
 
     async with aiohttp.ClientSession() as session:
-        await send(session, "🤖 ULTRA SNIPER (ANTI-SL)")
+        await send(session, "🤖 FINAL SNIPER READY")
 
         while True:
 
@@ -88,12 +89,13 @@ async def sniper():
                 await asyncio.sleep(2)
                 continue
 
-            mint = await find_strong_token(session)
+            mint = await find_token(session)
 
             if not mint:
                 await asyncio.sleep(2)
                 continue
 
+            # 🚀 BUY
             ACTIVE_TRADE = True
             CURRENT_TOKEN = mint
             ENTRY_TIME = time.time()
@@ -108,12 +110,14 @@ async def sniper():
 
                 if elapsed >= TP_TIME:
                     await send(session, f"💰 SELL (TP)\n{CURRENT_TOKEN}")
+                    used_tokens.add(CURRENT_TOKEN)   # 🔥 add to blacklist
                     ACTIVE_TRADE = False
                     CURRENT_TOKEN = None
                     break
 
                 if elapsed >= SL_TIME:
                     await send(session, f"🛑 SELL (SL)\n{CURRENT_TOKEN}")
+                    used_tokens.add(CURRENT_TOKEN)   # 🔥 add to blacklist
                     ACTIVE_TRADE = False
                     CURRENT_TOKEN = None
                     break
